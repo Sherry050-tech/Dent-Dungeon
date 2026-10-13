@@ -1,6 +1,6 @@
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum
+from sqlalchemy import Column, String, Boolean, DateTime, ForeignKey, Enum, true
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import relationship
 import enum
@@ -38,7 +38,8 @@ class User(Base):
     
     role = Column(Enum(UserRole), nullable=False)
     is_practitioner = Column(Boolean, nullable=False, default=False)
-    is_active = Column(Boolean, default=True)
+    is_active = Column(Boolean, nullable=False, default=True, server_default=true())
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
     
     created_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc))
     updated_at = Column(DateTime(timezone=True), default=lambda: datetime.now(timezone.utc), onupdate=lambda: datetime.now(timezone.utc))
