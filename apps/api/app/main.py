@@ -4,6 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes.auth import router as auth_router
 from app.api.routes.health import router as health_router
+from app.api.routes.settings import router as settings_router
+from app.api.routes.users import router as users_router
 from app.core.config import settings
 from app.core.errors import install_error_handlers
 
@@ -27,3 +29,5 @@ install_error_handlers(app)
 
 app.include_router(health_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
+app.include_router(users_router, prefix="/api/v1")
+app.include_router(settings_router, prefix="/api/v1")

@@ -22,10 +22,18 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
+from argon2 import PasswordHasher
+
+from app.core import security
 from app.core.database import Base, get_db
 from app.main import app
 from app import models  # noqa: F401
 from app.models import core  # noqa: F401  (registers the tables)
+
+
+# Argon2 is deliberately slow (about 100 ms per hash). Tests hash passwords constantly, so use a
+# cheap setting here. Production keeps the strong defaults, and hashes from either verify fine.
+security._hasher = PasswordHasher(time_cost=1, memory_cost=8, parallelism=1)
 
 
 def _make_engine():
