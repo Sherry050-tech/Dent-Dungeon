@@ -1,1 +1,20 @@
 # Add project-specific ignores as tooling is initialized.
+# secrets
+.env
+.env.*
+!.env.example
+!.env.local.example
+
+# python
+.venv/
+__pycache__/
+*.pyc
+
+# node
+node_modules/
+.next/
+
+# editor and OS
+.vscode/
+.DS_Store
+Thumbs.db

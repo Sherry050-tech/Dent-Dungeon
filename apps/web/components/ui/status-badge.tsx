@@ -1,4 +1,4 @@
-// components/ui/status-badge.tsx
+// components/ui/status-badge.tsx  (updated: no "pending", added "inactive")
 import { cn } from "@/lib/utils";
 
 // Colors come from the badge table in Part 7.2 (soft background + dark text).
@@ -9,8 +9,8 @@ const STYLES = {
   completed: { label: "Completed", cls: "bg-[#DCFCE7] text-[#15803D]" },
   cancelled: { label: "Cancelled", cls: "bg-[#F1F5F9] text-[#475569]" },
   no_show: { label: "No show", cls: "bg-[#FFE4E6] text-[#BE123C]" },
-  pending: { label: "Pending approval", cls: "bg-[#FEF3C7] text-[#B45309]" },
   active: { label: "Active", cls: "bg-[#DCFCE7] text-[#15803D]" },
+  inactive: { label: "Deactivated", cls: "bg-[#F1F5F9] text-[#475569]" },
   admin: { label: "Admin", cls: "bg-[#EDE9FE] text-[#6D28D9]" },
   doctor: { label: "Doctor", cls: "bg-[#CCFBF1] text-[#0F766E]" },
   receptionist: { label: "Receptionist", cls: "bg-[#E0F2FE] text-[#0369A1]" },
