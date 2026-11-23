@@ -12,7 +12,7 @@ import { EmptyState } from "@/components/ui/empty-state";
 
 const BADGES: BadgeStatus[] = [
   "scheduled", "confirmed", "in_progress", "completed", "cancelled",
-  "no_show", "pending", "active", "admin", "doctor", "receptionist",
+  "no_show", "inactive", "active", "admin", "doctor", "receptionist",
 ];
 
 export default function DesignPreview() {
