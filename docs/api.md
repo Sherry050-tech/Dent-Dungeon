@@ -1,478 +1,321 @@
-# API
-
-API documentation.
-
 # API Contract
 
-This document is the agreement between the backend (`apps/api`, FastAPI) and the frontend (`apps/web`, Next.js). The frontend can build against these shapes using mock data before the backend exists. If an endpoint needs to change, discuss it first, update this file in the same PR as the code, and then merge.
-
-Once the backend is running, FastAPI's live docs at `http://localhost:8000/docs` become the source of truth for exact schemas. This file stays the human-readable plan and the place where rules are explained.
-
-Field names match the tables in `docs/database.md`.
-
----
+Contract between `apps/api` (FastAPI) and `apps/web` (Next.js). Update this file in the same PR as API changes. Implemented schemas are ultimately verified at `http://localhost:8000/docs`.
 
 ## 1. Conventions
 
 | Topic | Rule |
 |---|---|
-| Base URL | `/api/v1` (e.g. `http://localhost:8000/api/v1`) |
-| Format | JSON, `snake_case` field names, UTF-8 |
+| Base URL | `/api/v1` |
+| Format | JSON, UTF-8, `snake_case` |
 | IDs | UUID strings |
-| Dates | `date`: `YYYY-MM-DD`. `datetime`: ISO 8601 in UTC, e.g. `2026-10-03T10:00:00Z`. The frontend converts to local time (Asia/Karachi) for display. |
-| Money | Decimal numbers sent as **strings** (`"2500.00"`) to avoid floating-point errors |
-| Auth | `Authorization: Bearer <access_token>` on every endpoint except those marked **Public** |
-| Updates | `PATCH` with only the fields that change. `PUT` is not used. |
-| Deletes | Return `204 No Content`. Patients, users and catalog items are soft-deleted. |
+| Dates | `YYYY-MM-DD`; datetimes ISO 8601 UTC |
+| Money | Decimal strings such as `"2500.00"` |
+| Auth | `Authorization: Bearer <access_token>` except public endpoints |
+| Updates | `PATCH` for partial updates |
+| Deletes | `204 No Content`; soft-delete/deactivate patients, staff and catalog items; retain clinical/financial history |
+| Tenant scope | Every authenticated request is scoped to the user's `clinic_id` |
+| Files | Private storage; API authorization required for every download |
 
-### Pagination (all list endpoints)
+### Pagination
 
-Query: `?page=1&limit=20` (default `limit` 20, max 100)
+List endpoints accept `?page=1&limit=20` (default 20, maximum 100) and return `{"items":[],"total":0,"page":1,"limit":20}`.
 
-```json
-{
-  "items": [ ],
-  "total": 134,
-  "page": 1,
-  "limit": 20
-}
-```
-
-### Error format (all errors)
+### Error format
 
 ```json
 {
-  "detail": "Human readable message",
+  "detail": "Human-readable message",
   "code": "MACHINE_READABLE_CODE",
-  "fields": { "phone": "Phone number is required" }
+  "fields": {"field_name": "Validation message"}
 }
 ```
 
-`fields` appears only on validation errors.
+`fields` is optional. Common status codes: `400 BAD_REQUEST`, `401 NOT_AUTHENTICATED`, `403 FORBIDDEN`, `404 NOT_FOUND`, `409 APPOINTMENT_CONFLICT`/`DUPLICATE_PATIENT`, `413 FILE_TOO_LARGE`, `415 UNSUPPORTED_FILE_TYPE`, `422 VALIDATION_ERROR`, `500 INTERNAL_ERROR`, `503 AI_UNAVAILABLE`.
 
-| Status | Meaning | Example `code` |
-|---|---|---|
-| 400 | Bad request | `BAD_REQUEST` |
-| 401 | Not logged in or token expired | `NOT_AUTHENTICATED`, `TOKEN_EXPIRED` |
-| 403 | Logged in but not allowed | `FORBIDDEN` |
-| 404 | Not found | `NOT_FOUND` |
-| 409 | Conflict | `APPOINTMENT_CONFLICT`, `EMAIL_TAKEN` |
-| 413 | File too large | `FILE_TOO_LARGE` |
-| 415 | File type not allowed | `UNSUPPORTED_FILE_TYPE` |
-| 422 | Validation failed | `VALIDATION_ERROR` |
-| 500 | Server error | `INTERNAL_ERROR` |
+Do not reveal whether an out-of-scope record exists in another clinic; return `404`.
 
----
+## 2. Product model: clinics, roles and permissions
 
-## 2. Roles and permissions
+Each clinic is a separate tenant. Every patient, appointment, clinical record, invoice, file, conversation, staff member and setting belongs to one clinic. The backend must enforce tenant isolation on every request.
 
-Roles: `admin`, `doctor`, `receptionist`.
+Roles: `admin`, `doctor`, `receptionist`. `is_practitioner` is independent of role: an admin/owner can also treat patients without needing a second account.
 
-| Area | admin | doctor | receptionist |
+| Area | Admin | Doctor/practitioner | Receptionist |
 |---|---|---|---|
-| Users (manage staff) | Full | Read self | Read self |
-| Patients: read / create / edit | Yes | Yes | Yes |
-| Patients: delete | Yes | No | No |
-| Appointments | Full | Full | Full |
-| Treatment catalog: read | Yes | Yes | Yes |
-| Treatment catalog: edit | Yes | No | No |
-| Patient treatments: create / edit | Yes | Yes | No (read only) |
-| Dental chart: write | Yes | Yes | No (read only) |
-| Documents and images: upload / view | Yes | Yes | Upload and view documents; view images |
-| Invoices and payments | Full | Read | Full |
-| AI assistant | Yes | Yes | No |
-| Clinic settings | Edit | Read | Read |
+| Clinic settings/staff | Manage | Read self | Read self |
+| Patients | Read/create/edit; soft-delete | Read/create/edit | Read/create/edit |
+| Appointments | Full | Manage own; view as permitted | Schedule/manage |
+| Treatment catalog | Read/edit | Read | Read |
+| Treatments/chart/tooth cases | Full | Create/edit clinical records | Read only |
+| Documents/images | Manage | View/upload/manage | Document upload/view; image access by policy |
+| Invoices/payments | Full | Read | Operational billing as authorized |
+| Financial dashboard | Full | No clinic-wide totals by default | As authorized by clinic policy |
+| Patient-scoped AI | Yes | Yes | No |
 | Audit logs | Read | No | No |
 
----
+Backend authorization is mandatory; hiding frontend controls is not security.
 
-## 3. Auth
+## 3. Auth and onboarding
 
-### `POST /auth/register` (Public)
+### `POST /auth/register` — Public, initial clinic onboarding only
 
-Creates a staff account. The **first account ever created** becomes an active `admin`. Every later registration is created as an inactive `receptionist` until an admin activates it and sets the proper role.
-
-Request:
-```json
-{ "full_name": "Dr. Sara Ahmed", "email": "sara@clinic.com", "password": "min 8 chars" }
-```
-Response `201`:
-```json
-{ "id": "uuid", "full_name": "Dr. Sara Ahmed", "email": "sara@clinic.com", "role": "receptionist", "is_active": false }
-```
-Errors: `409 EMAIL_TAKEN`, `422 VALIDATION_ERROR`.
-
-### `POST /auth/login` (Public)
+Creates a clinic and its first active admin/owner atomically. Do not make the first user in the entire database an admin; each clinic has its own owner. Do not accept a public `clinic_id` that lets users join another clinic.
 
 Request:
-```json
-{ "email": "sara@clinic.com", "password": "..." }
-```
-Response `200`:
+
 ```json
 {
-  "access_token": "jwt",
-  "refresh_token": "jwt",
-  "token_type": "bearer",
-  "expires_in": 3600,
-  "user": { "id": "uuid", "full_name": "Dr. Sara Ahmed", "email": "sara@clinic.com", "role": "doctor" }
+  "clinic_name": "Bright Smile Dental",
+  "full_name": "Dr. Sara Ahmed",
+  "email": "sara@example.com",
+  "password": "at least 8 characters",
+  "is_practitioner": true
 }
 ```
-Errors: `401 INVALID_CREDENTIALS`, `403 ACCOUNT_INACTIVE`.
 
-Access token lifetime: 60 minutes. Refresh token lifetime: 7 days.
+Response `201`:
 
-### `POST /auth/refresh` (Public)
+```json
+{
+  "clinic": {"id": "uuid", "name": "Bright Smile Dental"},
+  "user": {
+    "id": "uuid",
+    "clinic_id": "uuid",
+    "full_name": "Dr. Sara Ahmed",
+    "email": "sara@example.com",
+    "role": "admin",
+    "is_practitioner": true,
+    "is_active": true
+  }
+}
+```
 
-Request: `{ "refresh_token": "jwt" }`
-Response `200`: `{ "access_token": "jwt", "expires_in": 3600 }`
-Errors: `401 TOKEN_EXPIRED`.
+### `POST /auth/login` — Public
 
-### `GET /auth/me`
+Request: `{"email":"sara@example.com","password":"..."}`
 
-Returns the current user (same shape as `user` in the login response, plus `phone` and `specialization`).
+Response `200` includes `access_token`, `refresh_token`, `token_type: "bearer"`, `expires_in: 3600`, and a `user` object containing `id`, `clinic_id`, `full_name`, `email`, `role`, and `is_practitioner`.
 
-### `POST /auth/change-password`
-
-Request: `{ "current_password": "...", "new_password": "..." }`
-Response `204`. Errors: `400 WRONG_PASSWORD`.
-
-> Logout is handled by the frontend discarding both tokens.
-
----
-
-## 4. Users (admin)
+Access token lifetime: 60 minutes; refresh token lifetime: 7 days. Store only password hashes (Argon2 recommended). Refresh-token revocation/session tracking should be implemented before production.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/users?role=&is_active=&page=&limit=` | List staff |
-| POST | `/users` | Create a staff member (admin sets role and active state) |
-| GET | `/users/{id}` | Get one |
-| PATCH | `/users/{id}` | Update name, role, phone, specialization, `is_active` |
-| GET | `/users/doctors` | Active doctors only (for appointment booking dropdowns). Any role. |
+| POST | `/auth/refresh` | Exchange valid refresh token for new access token |
+| GET | `/auth/me` | Current user and clinic context |
+| POST | `/auth/change-password` | Verify current password and change it |
+| POST | `/auth/logout` | Invalidate refresh session when server-side tracking is implemented |
 
-User object:
-```json
-{
-  "id": "uuid", "full_name": "...", "email": "...", "role": "doctor",
-  "phone": "...", "specialization": "Orthodontist", "is_active": true,
-  "created_at": "2026-10-03T10:00:00Z"
-}
-```
+Staff are added by an authenticated clinic admin, preferably through invitations—not by public registration with a user-supplied clinic ID.
 
----
+## 4. Staff and practitioners
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/users?role=&is_active=&page=&limit=` | List staff in current clinic (admin) |
+| POST | `/users/invitations` | Invite staff with role and optional practitioner flag |
+| GET | `/users/{id}` | Get staff member in current clinic |
+| PATCH | `/users/{id}` | Update name, role, phone, specialization, `is_practitioner`, active state (admin) |
+| GET | `/users/doctors` | Active users who can treat patients (`role=doctor` or `is_practitioner=true`) |
+
+User object includes `id`, `clinic_id`, `full_name`, `email`, `role`, nullable `phone`, nullable `specialization`, `is_practitioner`, `is_active`, and timestamps. A practitioner must be active and belong to the same clinic as the appointment/patient.
 
 ## 5. Patients
 
 Patient object:
+
 ```json
 {
   "id": "uuid",
+  "clinic_id": "uuid",
   "patient_number": "P-000123",
   "first_name": "Ali",
   "last_name": "Khan",
   "gender": "male",
   "date_of_birth": "1995-04-12",
-  "phone": "03001234567",
-  "email": "ali@example.com",
-  "address": "...",
-  "national_id": "35202-1234567-1",
-  "emergency_contact_name": "...",
-  "emergency_contact_phone": "...",
+  "phone": null,
+  "emergency_contact_name": null,
+  "emergency_contact_phone": null,
   "allergies": "Penicillin",
-  "medical_history": "...",
-  "notes": "...",
+  "medical_history": "Asthma",
+  "medications": "Medication and dosage as reported",
+  "notes": "General patient notes",
   "created_at": "2026-10-03T10:00:00Z",
   "updated_at": "2026-10-03T10:00:00Z"
 }
 ```
 
-| Method | Path | Description |
-|---|---|---|
-| GET | `/patients?search=&page=&limit=` | List. `search` matches name, phone or patient number. List items contain: `id`, `patient_number`, `first_name`, `last_name`, `phone`, `date_of_birth`, `last_visit` (nullable datetime), `next_appointment` (nullable datetime). |
-| POST | `/patients` | Create. Required: `first_name`, `last_name`, `phone`. Returns `201` with the full object. |
-| GET | `/patients/{id}` | Full object |
-| PATCH | `/patients/{id}` | Update any fields |
-| DELETE | `/patients/{id}` | Soft delete (admin only), `204` |
-| GET | `/patients/{id}/summary` | Overview for the patient page: `{ "patient": {...}, "upcoming_appointments": [...], "active_treatments": [...], "outstanding_balance": "5000.00" }` |
-
----
-
-## 6. Appointments
-
-Appointment object:
-```json
-{
-  "id": "uuid",
-  "patient": { "id": "uuid", "first_name": "Ali", "last_name": "Khan", "phone": "0300..." },
-  "doctor": { "id": "uuid", "full_name": "Dr. Sara Ahmed" },
-  "start_time": "2026-10-05T09:00:00Z",
-  "end_time": "2026-10-05T09:30:00Z",
-  "status": "scheduled",
-  "reason": "Toothache",
-  "notes": null,
-  "cancelled_reason": null
-}
-```
-
-Patient and doctor are embedded so the calendar needs no extra calls.
+Do not collect patient CNIC/national ID, residential address or email in the default product. Patient phone is optional. Clinic contact details are separate.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/appointments?from=&to=&doctor_id=&patient_id=&status=&page=&limit=` | List. `from` and `to` are datetimes. Use them for calendar views (day, week, month). |
-| POST | `/appointments` | Create. Body: `patient_id`, `doctor_id`, `start_time`, `end_time`, `reason?`, `notes?` |
-| GET | `/appointments/{id}` | One appointment |
-| PATCH | `/appointments/{id}` | Reschedule or edit (`start_time`, `end_time`, `doctor_id`, `status`, `reason`, `notes`) |
-| POST | `/appointments/{id}/cancel` | Body: `{ "cancelled_reason": "..." }`. Sets status to `cancelled`. |
-| GET | `/patients/{id}/appointments` | Same list, filtered to one patient |
-| GET | `/appointments/availability?doctor_id=&date=` | Free slots for that day: `{ "slots": [{ "start_time": "...", "end_time": "..." }] }`, based on working hours and slot length in settings |
+| GET | `/patients?search=&page=&limit=` | Search by name, optional phone, patient number |
+| POST | `/patients` | Create; `first_name` and `last_name` required; phone optional |
+| GET | `/patients/{id}` | Get profile |
+| PATCH | `/patients/{id}` | Update allowed profile fields |
+| DELETE | `/patients/{id}` | Soft-delete (admin); preserve linked history |
+| GET | `/patients/{id}/summary` | Patient, upcoming appointments, active treatments, outstanding balance |
+| GET | `/patients/{id}/appointments` | Patient appointments |
+| GET | `/patients/{id}/treatments?status=` | Patient treatments |
+| GET | `/patients/{id}/invoices` | Patient invoices |
 
-Errors: `409 APPOINTMENT_CONFLICT` when the doctor already has an overlapping appointment. The response includes the conflicting appointment id in `detail`.
+`patient_number` is generated by the backend and unique within a clinic. Phone is not unique (family members may share it). Every referenced patient must belong to the authenticated clinic.
 
-Status flow: `scheduled` -> `confirmed` -> `in_progress` -> `completed`. From `scheduled` or `confirmed` it can also go to `cancelled` or `no_show`.
-
----
-
-## 7. Treatments
-
-### Treatment catalog (the price list)
-
-Object: `{ "id", "code", "name", "category", "description", "default_price": "2500.00", "default_duration_min": 30, "is_active": true }`
+## 6. Patient CSV import — planned after core patient APIs
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/treatment-catalog?search=&category=&is_active=&page=&limit=` | List |
+| POST | `/patients/import/preview` | Validate uploaded CSV, map columns, flag errors/possible duplicates; no records written |
+| POST | `/patients/import/confirm` | Confirm preview/import token and import valid rows |
+
+Preview and require confirmation. Never silently overwrite records. Import only supported fields; do not import CNIC, patient address or patient email. Enforce row/file limits and clinic scope. These endpoints are planned, not Phase 1.
+
+## 7. Appointments
+
+Object includes appointment `id`, embedded patient (`id`, name, optional phone), embedded doctor (`id`, name), `start_time`, `end_time`, `status`, `reason`, `notes`, and `cancelled_reason`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/appointments?from=&to=&doctor_id=&patient_id=&status=&page=&limit=` | List for calendar |
+| POST | `/appointments` | Create using patient, practitioner, start/end and optional reason/notes |
+| GET | `/appointments/{id}` | Get one |
+| PATCH | `/appointments/{id}` | Reschedule/update |
+| POST | `/appointments/{id}/cancel` | Cancel with optional reason |
+| GET | `/appointments/availability?doctor_id=&date=` | Available slots based on clinic hours |
+| GET | `/patients/{id}/appointments` | Appointments for patient |
+
+Prevent overlapping appointments for the same practitioner using a database exclusion constraint; exclude `cancelled` and `no_show`. Return `409 APPOINTMENT_CONFLICT`. Status flow: `scheduled` → `confirmed` → `in_progress` → `completed`; scheduled/confirmed may also become `cancelled` or `no_show`.
+
+## 8. Treatment catalog and patient treatments
+
+Treatment catalog object: `id`, `code`, `name`, `category`, `description`, `default_price` (decimal string), `default_duration_min`, `is_active`.
+
+| Method | Path | Description |
+|---|---|---|
+| GET | `/treatment-catalog?search=&category=&is_active=&page=&limit=` | List clinic catalog |
 | POST | `/treatment-catalog` | Create (admin) |
-| PATCH | `/treatment-catalog/{id}` | Update (admin). To retire an item set `is_active` to `false`. |
+| PATCH | `/treatment-catalog/{id}` | Update/retire (admin) |
+| GET | `/patients/{id}/treatments?status=` | Patient treatment list |
+| POST | `/patients/{id}/treatments` | Add treatment |
+| PATCH | `/treatments/{id}` | Update; completion stamps `performed_at` |
+| DELETE | `/treatments/{id}` | Only planned and not invoiced |
 
-### Patient treatments
+Treatment object includes `patient_id`, nullable `tooth_case_id`, `catalog`, `doctor`, nullable `appointment_id`, nullable `tooth_number`, `surfaces`, `status`, `price`, `discount`, `notes`, `performed_at`. If a case is supplied, case/patient/clinic/tooth must match.
 
-Object:
-```json
-{
-  "id": "uuid",
-  "patient_id": "uuid",
-  "catalog": { "id": "uuid", "code": "RCT-01", "name": "Root Canal" },
-  "doctor": { "id": "uuid", "full_name": "Dr. Sara Ahmed" },
-  "appointment_id": null,
-  "tooth_number": 36,
-  "surfaces": null,
-  "status": "planned",
-  "price": "15000.00",
-  "discount": "0.00",
-  "notes": null,
-  "performed_at": null
-}
-```
+## 9. Dental chart and tooth cases
+
+FDI numbering: adult `11–18`, `21–28`, `31–38`, `41–48`; primary `51–55`, `61–65`, `71–75`, `81–85`. Surface notation includes `M`, `O`, `D`, `B`, `L`, `I`.
+
+### Dental chart
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/patients/{id}/treatments?status=` | A patient's treatments |
-| POST | `/patients/{id}/treatments` | Add. Body: `catalog_id`, `doctor_id`, `tooth_number?`, `surfaces?`, `price?` (defaults to catalog price), `discount?`, `appointment_id?`, `notes?` |
-| PATCH | `/treatments/{id}` | Update details or `status`. Setting `completed` stamps `performed_at`. |
-| DELETE | `/treatments/{id}` | Only allowed while `planned` and not yet invoiced, `204` |
+| GET | `/patients/{id}/dental-chart` | Current state |
+| GET | `/patients/{id}/dental-chart/history?tooth_number=` | Historical findings |
+| POST | `/patients/{id}/dental-chart/entries` | Add historical finding (authorized clinical staff) |
 
----
+Each chart change is a new row; don't overwrite past findings.
 
-## 7a. Dental chart
+### Tooth cases
 
-Teeth use FDI numbering (11-48 adult, 51-85 baby teeth).
+A case groups tooth-specific clinical notes, findings, treatment plan, treatments and imaging. One tooth can have multiple cases over time.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/patients/{id}/dental-chart` | **Current** state: latest entry per tooth |
-| GET | `/patients/{id}/dental-chart/history?tooth_number=` | Full history (optionally one tooth), newest first |
-| POST | `/patients/{id}/dental-chart/entries` | Record a finding (doctor, admin) |
+| GET | `/patients/{patient_id}/tooth-cases?tooth_number=&status=` | List patient cases |
+| POST | `/patients/{patient_id}/tooth-cases` | Create with `tooth_number`, `title`, optional `diagnosis_notes`, `treatment_plan` |
+| GET | `/patients/{patient_id}/tooth-cases/{case_id}` | Case details and linked records |
+| PATCH | `/patients/{patient_id}/tooth-cases/{case_id}` | Update title, status, notes or plan |
 
-Current chart response:
-```json
-{
-  "patient_id": "uuid",
-  "teeth": [
-    { "tooth_number": 36, "surface": "O", "condition": "cavity", "notes": "Deep caries", "recorded_at": "2026-10-03T10:00:00Z", "recorded_by": "Dr. Sara Ahmed" }
-  ]
-}
-```
-Teeth with no entries are omitted. The frontend treats them as `healthy`.
+Statuses: `open`, `in_progress`, `resolved`, `closed`. Validate FDI number and confirm case belongs to route patient and current clinic.
 
-Create body: `{ "tooth_number": 36, "surface": "O", "condition": "cavity", "notes": "..." }`
-Response `201`: the created entry.
+## 10. Documents and imaging
 
----
-
-## 8. Documents and imaging
-
-Files are uploaded as `multipart/form-data`. Limits: documents 10 MB (PDF, JPG, PNG, DOCX), images 25 MB (JPG, PNG, DICOM).
+Uploads use `multipart/form-data`. Proposed initial limits: documents 10 MB (PDF/JPG/PNG/DOCX), images 25 MB (JPG/PNG/DICOM). Validate actual content server-side and store in private object storage.
 
 ### Documents
 
-Object: `{ "id", "patient_id", "type", "title", "mime_type", "size_bytes", "index_status", "uploaded_by", "created_at" }`
+Object: `id`, `patient_id`, `type`, `title`, `mime_type`, `size_bytes`, `index_status`, `uploaded_by`, `created_at`.
 
 | Method | Path | Description |
 |---|---|---|
 | GET | `/patients/{id}/documents?type=` | List |
-| POST | `/patients/{id}/documents` | Upload. Form fields: `file`, `type`, `title`. Triggers AI indexing in the background (`index_status`: `pending` -> `indexed` or `failed`). |
-| GET | `/documents/{id}/download` | Returns the file |
-| DELETE | `/documents/{id}` | `204`. Also removes its AI chunks. |
+| POST | `/patients/{id}/documents` | Upload |
+| GET | `/documents/{id}/download` | Authenticated download |
+| DELETE | `/documents/{id}` | Remove from active workspace and remove AI chunks; retain audit trail |
 
 ### Images
 
-Object: `{ "id", "patient_id", "image_type", "tooth_number", "thumbnail_url", "mime_type", "size_bytes", "taken_at", "notes", "created_at" }`
+Object includes `id`, `patient_id`, nullable `tooth_case_id`, `image_type`, nullable `tooth_number`, `mime_type`, `size_bytes`, `taken_at`, `notes`, `created_at`.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/patients/{id}/images?image_type=&tooth_number=` | List with thumbnail URLs |
-| POST | `/patients/{id}/images` | Upload. Form fields: `file`, `image_type`, `tooth_number?`, `taken_at?`, `notes?` |
-| GET | `/images/{id}/file` | Returns the full-size image |
-| PATCH | `/images/{id}` | Edit `image_type`, `tooth_number`, `taken_at`, `notes` |
-| DELETE | `/images/{id}` | `204` |
+| GET | `/patients/{id}/images?image_type=&tooth_number=&tooth_case_id=` | List |
+| POST | `/patients/{id}/images` | Upload image with optional tooth/case/date/notes |
+| GET | `/images/{id}/file` | Authenticated full-size image |
+| PATCH | `/images/{id}` | Update metadata |
+| DELETE | `/images/{id}` | Remove from active workspace under retention policy |
 
-File downloads require the `Authorization` header, so the frontend fetches them with the token and displays them as blob URLs. Files are never served as public static URLs.
+Never expose permanent public URLs for clinical files. Check clinic and patient authorization on every file request.
 
----
+## 11. Billing
 
-## 9. Billing
-
-Invoice object:
-```json
-{
-  "id": "uuid",
-  "invoice_number": "INV-2026-0001",
-  "patient": { "id": "uuid", "first_name": "Ali", "last_name": "Khan" },
-  "status": "issued",
-  "items": [
-    { "id": "uuid", "patient_treatment_id": "uuid", "description": "Root Canal - tooth 36", "quantity": 1, "unit_price": "15000.00", "line_total": "15000.00" }
-  ],
-  "subtotal": "15000.00",
-  "discount": "1000.00",
-  "total": "14000.00",
-  "paid_amount": "5000.00",
-  "balance": "9000.00",
-  "issued_at": "2026-10-03T10:00:00Z",
-  "due_date": "2026-10-17",
-  "payments": [
-    { "id": "uuid", "amount": "5000.00", "method": "cash", "reference": null, "paid_at": "2026-10-03T10:30:00Z" }
-  ]
-}
-```
-
-`balance` is calculated by the backend (`total - paid_amount`).
+Invoice fields include `id`, clinic-unique `invoice_number`, patient, `status`, `items`, `subtotal`, `discount`, `total`, `paid_amount`, computed `balance`, `issued_at`, `due_date`, `notes`, and payments. Money is represented as decimal strings. `balance = total - paid_amount`.
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/invoices?status=&patient_id=&from=&to=&page=&limit=` | List (items and payments omitted from list rows) |
-| POST | `/invoices` | Create a draft. Body: `patient_id`, `treatment_ids: [uuid]` (completed treatments to bill) and/or `custom_items: [{description, quantity, unit_price}]`, `discount?`, `due_date?`, `notes?` |
+| GET | `/invoices?status=&patient_id=&from=&to=&page=&limit=` | List |
+| POST | `/invoices` | Create draft from completed treatment IDs and/or custom line items |
 | GET | `/invoices/{id}` | Full invoice |
-| PATCH | `/invoices/{id}` | Edit a **draft** only |
-| POST | `/invoices/{id}/issue` | Draft -> issued |
-| POST | `/invoices/{id}/payments` | Record a payment. Body: `amount`, `method`, `reference?`, `paid_at?`. Updates status automatically. |
-| POST | `/invoices/{id}/void` | Voids the invoice (admin). Body: `{ "reason": "..." }` |
-| GET | `/patients/{id}/invoices` | One patient's invoices |
+| PATCH | `/invoices/{id}` | Edit draft only |
+| POST | `/invoices/{id}/issue` | Issue draft |
+| POST | `/invoices/{id}/payments` | Record amount, method, optional reference/date |
+| POST | `/invoices/{id}/void` | Void invoice (admin, reason required) |
+| GET | `/patients/{id}/invoices` | Patient invoices |
 
-Errors: `400 OVERPAYMENT` (payment exceeds balance), `400 INVOICE_NOT_PAYABLE` (draft or void), `400 INVOICE_LOCKED` (editing an issued invoice).
+Reject overpayment, payment on draft/void invoices, and edits to issued invoices. Update invoice totals/status and payment records transactionally. Payments are immutable; corrections require an auditable correction/reversal process.
 
----
+## 12. Dashboard and reports
 
-## 10. Dashboard
+`GET /dashboard/summary` returns today's appointment counts, new patients, upcoming appointments, recent patients, today's/monthly revenue and outstanding balances according to permissions. Doctors see their own schedule and no clinic-wide financial totals by default. Admins receive owner-level metrics. Receptionist financial access follows clinic policy. All date boundaries use the clinic timezone.
 
-### `GET /dashboard/summary`
+## 13. AI assistant — planned Phase 4
 
-```json
-{
-  "today": {
-    "appointments_total": 12,
-    "appointments_completed": 5,
-    "appointments_remaining": 7,
-    "new_patients": 2
-  },
-  "revenue": { "today": "45000.00", "this_month": "820000.00" },
-  "outstanding_balance_total": "130000.00",
-  "upcoming_appointments": [ { "...": "appointment objects, next 5" } ],
-  "recent_patients": [ { "id": "uuid", "first_name": "...", "last_name": "...", "created_at": "..." } ]
-}
-```
-
-A doctor sees only their own appointment counts. Revenue figures are returned to admin and receptionist only; for doctors the `revenue` field is `null`.
-
----
-
-## 11. AI assistant (per patient)
-
-Doctors and admins only. The assistant answers using only that patient's data (profile, dental chart, treatments, uploaded documents). It never sees another patient's data.
-
-Conversation object: `{ "id", "patient_id", "title", "created_at", "updated_at" }`
-
-Message object:
-```json
-{
-  "id": "uuid",
-  "role": "assistant",
-  "content": "Based on the chart, tooth 36 has a deep cavity...",
-  "sources": [
-    { "type": "dental_chart", "id": "uuid", "label": "Tooth 36, 2026-10-03" },
-    { "type": "document", "id": "uuid", "label": "Lab report.pdf", "page": 2 }
-  ],
-  "created_at": "2026-10-03T10:00:00Z"
-}
-```
+Doctors/practitioners and admins only. AI is decision support, not autonomous diagnosis; display: “AI suggestions must be reviewed by a qualified dentist.”
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/patients/{id}/ai/conversations` | List conversations |
-| POST | `/patients/{id}/ai/conversations` | Start one. Body: `{ "title"?: "..." }` |
-| GET | `/ai/conversations/{id}/messages` | Message history |
-| POST | `/ai/conversations/{id}/messages` | Send a question. Body: `{ "content": "..." }` |
-| DELETE | `/ai/conversations/{id}` | `204` |
+| GET | `/patients/{id}/ai/conversations` | List |
+| POST | `/patients/{id}/ai/conversations` | Start |
+| GET | `/ai/conversations/{id}/messages` | History |
+| POST | `/ai/conversations/{id}/messages` | Ask question; optional SSE |
+| DELETE | `/ai/conversations/{id}` | Delete under retention policy |
 
-### Streaming
+Every retrieval and citation must be scoped to authorized clinic and patient. Include source references to documents/pages, chart entries, cases or treatments. Review privacy/data-handling settings before sending clinical data to external model providers.
 
-`POST /ai/conversations/{id}/messages` streams the answer when the request has the header `Accept: text/event-stream`. Events:
-
-```
-event: token
-data: {"text": "Based on"}
-
-event: sources
-data: {"sources": [ ... ]}
-
-event: done
-data: {"message_id": "uuid"}
-```
-
-Without that header it returns the complete message object as normal JSON.
-
-Errors: `403 FORBIDDEN` (receptionist), `503 AI_UNAVAILABLE` (model provider unreachable).
-
-The AI gives decision support only, never a diagnosis. The UI must show a short notice: "AI suggestions must be reviewed by a qualified dentist."
-
----
-
-## 12. Settings and admin
+## 14. Settings, audit and health
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/settings/clinic` | Clinic profile and defaults (any role) |
-| PATCH | `/settings/clinic` | Update (admin). Fields: `clinic_name`, `address`, `phone`, `email`, `currency`, `timezone`, `working_hours`, `default_slot_min` |
-| GET | `/audit-logs?user_id=&entity_type=&from=&to=&page=&limit=` | Audit trail (admin) |
-| GET | `/health` | **Public.** `{ "status": "ok" }` for checks |
+| GET | `/settings/clinic` | Current clinic settings |
+| PATCH | `/settings/clinic` | Admin updates clinic name/contact, currency, timezone, hours and default slot length |
+| GET | `/audit-logs?user_id=&entity_type=&from=&to=&page=&limit=` | Admin audit trail |
+| GET | `/health` | Public API process health: `{"status":"ok"}` |
 
----
+Clinic contact address/email are allowed; patient address/email are not part of the default patient schema. Never log passwords or tokens.
 
-## 13. Build order
+## 15. Build order
 
-| Phase | Endpoints | Backend | Frontend |
-|---|---|---|---|
-| 1 | Auth, users, settings, health | You | Login, register, layout |
-| 2 | Patients, appointments, treatments | You | Patient pages, calendar |
-| 3 | Dental chart, documents, images, billing, dashboard | You | Chart UI, viewer, billing |
-| 4 | AI conversations | You | AI chat UI |
+1. Phase 1: clinic onboarding, users, settings, health, DB connection, migrations and authentication.
+2. Phase 2: patients, appointments, treatment catalog and patient treatments.
+3. Phase 3: dental chart, tooth cases, documents/images, billing and dashboard.
+4. Phase 3.5: CSV import preview/confirmation.
+5. Phase 4: patient-scoped AI/RAG.
+6. Later: appointment reminders after validating WhatsApp/SMS demand, consent and provider costs.
 
----
+## 16. Change process
 
-## 14. Change process
-
-1. Propose the change in a GitHub issue or message.
-2. Update this file in the same PR as the code change.
-3. The other person reviews both.
-4. Never remove or rename a field without telling the frontend first. Adding optional fields is safe.
-
+1. Discuss changes before implementation.
+2. Update this file in the same PR as code.
+3. Review contract changes with frontend owner.
+4. Treat documented endpoints as planned until implemented and tested.
