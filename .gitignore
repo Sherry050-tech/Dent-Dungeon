@@ -1,9 +1,8 @@
-# Add project-specific ignores as tooling is initialize
-
-# Environments
+# Environments and secrets
 .env
 .env.*
 !.env.example
+!.env.local.example
 
 # Python
 __pycache__/
@@ -27,7 +26,8 @@ npm-debug.log
 yarn-error.log
 .pnp.*
 
-# OS generated files
+# Editor and OS
+.vscode/
 .DS_Store
 .DS_Store?
 ._*
